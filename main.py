@@ -25,7 +25,7 @@ API_SECRET = os.environ.get("APCA_API_SECRET_KEY")
 PAPER = os.environ.get("APCA_PAPER", "true").lower() in ("1", "true", "yes")
 
 RUN_EVERY_SECONDS = int(os.environ.get("RUN_EVERY_SECONDS", "3600"))
-BARS_NEEDED = 260
+BARS_NEEDED = 260  # sufficient for 240 + buffer on 15-min bars
 
 SP500_URL = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/master/data/constituents.csv"
 ETF_ALLOWLIST = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLV", "ARKK"]
@@ -199,6 +199,32 @@ def run_once():
 
     df = pd.concat(all_frames).sort_index()
     sigs = compute_signals(df)
+
+    # -----------------------
+    # NEW: SPY market filter (15-min MA60 < MA240)
+    # -----------------------
+    market_declining = False
+    try:
+        if "SPY" in df.index.get_level_values(0):
+            spy_closes = df.xs("SPY", level=0)["close"].sort_index()
+            spy_ma60 = spy_closes.rolling(window=60, min_periods=60).mean().iloc[-1]
+            spy_ma240 = spy_closes.rolling(window=240, min_periods=240).mean().iloc[-1]
+            if not (math.isnan(spy_ma60) or math.isnan(spy_ma240)):
+                market_declining = spy_ma60 < spy_ma240
+                logger.info(f"SPY 15m MA60={spy_ma60:.4f}, MA240={spy_ma240:.4f} -> declining={market_declining}")
+            else:
+                logger.info("Insufficient SPY bars for MA60/MA240; skipping buys this cycle.")
+        else:
+            logger.info("SPY bars missing from fetched data; skipping buys this cycle.")
+    except Exception as e:
+        logger.error(f"Failed to compute SPY market filter: {e}")
+
+    if not market_declining:
+        # Gate: do not place *any* buys unless SPY MA60 < MA240
+        for sym, s in sigs.items():
+            logger.info(f"{sym}: market filter not satisfied (SPY MA60 >= MA240). No buy.")
+        return
+    # -----------------------
 
     notional_per_trade = available_cash * 0.05
     if notional_per_trade < 1.0:
